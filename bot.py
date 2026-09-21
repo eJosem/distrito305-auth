@@ -27,7 +27,7 @@ CANAL_ESTADO_ID = 1542678626300858468
 
 CLIENT_ID = "1548535889100013608"
 CLIENT_SECRET = "MwRsptlpfzr9Dd1eg9qB5TgxuIgpKCff"  # <--- Coloca tu Secret real del Discord Developer Portal
-REDIRECT_URI = "https://distrito305auth.discloud.app/callback"
+REDIRECT_URI = "https://distrito305-auth-web.onrender.com/callback"
 
 CFX_CODE = "5oozbea"                       
 FIVEM_IP = "34.128.4.46"
