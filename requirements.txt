@@ -1,0 +1,7 @@
+discord.py
+flask
+requests
+aiohttp
+yt-dlp
+imageio-ffmpeg
+gunicorn
