@@ -37,7 +37,7 @@ def callback():
     if not CLIENT_SECRET or not BOT_TOKEN:
         return "Error interno: Faltan variables de entorno (CLIENT_SECRET o BOT_TOKEN) en la configuración.", 500
 
-    # 1. Intercambiar el código por un Access Token
+   # 1. Intercambiar el código por el Access Token de OAuth2
     token_url = "https://discord.com/api/v10/oauth2/token"
     payload = {
         "client_id": CLIENT_ID,
@@ -46,7 +46,10 @@ def callback():
         "code": code,
         "redirect_uri": REDIRECT_URI
     }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "DistritoBOT-OAuth2 (https://distrito305-auth-web.onrender.com, v1.0)"
+    }
 
     token_response = requests.post(token_url, data=payload, headers=headers)
     if token_response.status_code != 200:
