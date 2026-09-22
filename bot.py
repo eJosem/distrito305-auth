@@ -11,33 +11,45 @@ import threading
 from flask import Flask, request
 import requests
 
+# ==========================================
 # 1. Configuración de Intents
+# ==========================================
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.reactions = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 2. Configuración de IDs de Servidor, Roles, Canales y Credenciales OAuth2
-GUILD_ID = 1542526849400803409             
+# ==========================================
+# 2. Configuración de IDs y Credenciales
+# ==========================================
+GUILD_ID = 1279183377778937917              
+
 ROL_TRABAJANDO_ID = 1548547466561855538    
 ROL_VERIFICADO_ID = 1542604216474796066    
 CANAL_BIENVENIDA_ID = 1542604218270228576  
 CANAL_ESTADO_ID = 1542678626300858468      
 
+# Canal de Logs de Verificación
+CANAL_LOGS_ID = 1551759127322042369  
+
+# Credenciales OAuth2 (Asegúrate de configurar CLIENT_SECRET en Render)
 CLIENT_ID = "1548535889100013608"
-CLIENT_SECRET = "MwRsptlpfzr9Dd1eg9qB5TgxuIgpKCff"  # <--- Coloca tu Secret real del Discord Developer Portal
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "MwRsptIpfzr9Dd1eg9qB5TgxuIgpKCff")
 REDIRECT_URI = "https://distrito305-auth-web.onrender.com/callback"
+
+# Token centralizado del Bot
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "MTU0ODUzNTg4OTEwMDAxMzYwOA.GzJ2fm.xoo6J8Zx7sbJIATpqfBIN5LzaqbEyiM9mdQ6Hw")
 
 CFX_CODE = "5oozbea"                       
 FIVEM_IP = "34.128.4.46"
-BANNER_URL = "https://cdn.discordapp.com/attachments/1542762298995773512/1544973576405520484/C4EF066D-E2D3-413B-8FEF-E42CABAE9E4A.png?ex=6aa99d84&is=6aa84c04&hm=00182729ee3b2e38221f462a23c8f7e0c2b2bf33b3875c834c188d4c3eb67954&"
-
-BOT_TOKEN = "MTU0ODUzNTg4OTEwMDAxMzYwOA.GDgLYG.-HLJ_xU4wD4GkcbtYofX-fJyYWihZCoNszAes8"
+BANNER_URL = "https://cdn.discordapp.com/attachments/1542762298995773512/1544973576405520484/C4EF066D-E2D3-413B-8FEF-E42CABAE9E4A.png"
 
 mensaje_estado_id = None
 
+# ==========================================
 # Base de datos SQLite
+# ==========================================
 conn = sqlite3.connect("fichajes.db", check_same_thread=False)
 c = conn.cursor()
 c.execute("""CREATE TABLE IF NOT EXISTS fichajes (
@@ -47,67 +59,110 @@ c.execute("""CREATE TABLE IF NOT EXISTS fichajes (
 )""")
 conn.commit()
 
-# Configuración del Servidor Flask para OAuth2
+# ==========================================
+# Servidor Flask (OAuth2 Web Callback + Logs)
+# ==========================================
 app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Servidor de Autenticación Activo", 200
 
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
     if not code:
-        return "No se encontró el código de autorización", 400
+        return "<h3>Error: No se recibió código de autorización de Discord.</h3>", 400
 
-    # Intercambio de código por token de acceso de Discord
-    data = {
+    # 1. Intercambiar el código por el Access Token de OAuth2
+    payload = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": REDIRECT_URI
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     
-    response = requests.post("https://discord.com/api/oauth2/token", data=data, headers=headers)
-    json_data = response.json()
-    access_token = json_data.get("access_token")
+    token_res = requests.post("https://discord.com/api/v10/oauth2/token", data=payload, headers=headers)
     
-    if not access_token:
-        return f"Error al obtener el token de acceso de Discord: {json_data.get('error_description', 'Desconocido')}", 400
+    if token_res.status_code != 200:
+        return f"<h3>Error en autenticación con Discord ({token_res.status_code}):</h3><pre>{token_res.text}</pre>", 400
 
-    # Obtener información del usuario
-    user_response = requests.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {access_token}"})
-    user_id = user_response.json().get("id")
+    token_data = token_res.json()
+    access_token = token_data.get("access_token")
 
-    if not user_id:
-        return "Error al obtener los datos de la cuenta.", 400
+    # 2. Obtener la información del usuario autenticado (@me)
+    user_headers = {"Authorization": f"Bearer {access_token}"}
+    user_res = requests.get("https://discord.com/api/v10/users/@me", headers=user_headers)
+    if user_res.status_code != 200:
+        return f"<h3>Error al obtener datos del usuario ({user_res.status_code}):</h3><pre>{user_res.text}</pre>", 400
 
-    # Añadir usuario al servidor o asignarle rol mediante API REST de Discord
-    url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}"
+    user_info = user_res.json()
+    user_id = user_info.get("id")
+    username = user_info.get("username")
+
+    # 3. Forzar unión del usuario al servidor (guilds.join) si aún no está dentro, o darle el rol
     bot_headers = {
         "Authorization": f"Bot {BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "access_token": access_token,
-        "roles": [str(ROL_VERIFICADO_ID)]
+
+    # Intentar meterlo al servidor con su access_token
+    join_payload = {"access_token": access_token}
+    requests.put(
+        f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}",
+        json=join_payload,
+        headers=bot_headers
+    )
+
+    # Otorgar el rol de verificado
+    requests.put(
+        f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{ROL_VERIFICADO_ID}",
+        headers=bot_headers
+    )
+
+    # 4. Obtener IP y Geolocalización para los logs
+    ip_cliente = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if ip_cliente:
+        ip_cliente = ip_cliente.split(',')[0].strip()
+
+    pais, ciudad = "Desconocido", "Desconocida"
+    try:
+        geo_res = requests.get(f"http://ip-api.com/json/{ip_cliente}", timeout=3).json()
+        pais = geo_res.get("country", "Desconocido")
+        ciudad = geo_res.get("city", "Desconocida")
+    except Exception:
+        pass
+
+    # 5. Enviar mensaje de Log al canal de Discord
+    embed_payload = {
+        "embeds": [{
+            "title": "🟢 Nueva Verificación Registrada (OAuth2)",
+            "color": 3066993,
+            "fields": [
+                {"name": "Usuario", "value": f"<@{user_id}> (`{username}`)", "inline": True},
+                {"name": "IP Registrada", "value": f"`{ip_cliente}`", "inline": True},
+                {"name": "Ubicación", "value": f"{ciudad}, {pais}", "inline": True}
+            ]
+        }]
     }
 
-    add_response = requests.put(url, json=payload, headers=bot_headers)
-    
-    if add_response.status_code in [201, 204]:
-        return "<h1>¡Verificación exitosa!</h1><p>Has sido verificado y añadido al servidor de Distrito 305 RP. Ya puedes cerrar esta ventana.</p>"
-    else:
-        # Intentar añadir únicamente el rol si el usuario ya estaba en el servidor
-        role_url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{ROL_VERIFICADO_ID}"
-        role_resp = requests.put(role_url, headers=bot_headers)
-        if role_resp.status_code == 204:
-            return "<h1>¡Verificación exitosa!</h1><p>Tu rol de verificado ha sido asignado correctamente. Ya puedes cerrar esta ventana.</p>"
-        return f"Error al procesar la verificación (Código {add_response.status_code}): {add_response.text}", 400
+    requests.post(
+        f"https://discord.com/api/v10/channels/{CANAL_LOGS_ID}/messages",
+        json=embed_payload,
+        headers=bot_headers
+    )
+
+    return "<h1 style='color:green; font-family:sans-serif; text-align:center; margin-top:50px;'>¡Verificación completada con éxito! Ya puedes volver a Discord.</h1>", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# Configuración de Música
+# ==========================================
+# Configuración de Música (yt_dlp)
+# ==========================================
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'extractflat': False,
@@ -124,6 +179,9 @@ FFMPEG_OPTIONS = {
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
+# ==========================================
+# Eventos y Tareas del Bot
+# ==========================================
 @bot.event
 async def on_ready():
     print(f"✅ Bot conectado correctamente como: {bot.user} (ID: {bot.user.id})")
@@ -221,14 +279,17 @@ async def on_member_join(member: discord.Member):
     embed.set_footer(text="Distrito 305 RP")
     await canal.send(embed=embed)
 
+# ==========================================
+# Panel de Verificación y Comandos
+# ==========================================
 class BotonPanelVerificacion(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         oauth_url = (
-            f"https://discord.com/api/oauth2/authorize"
+            f"https://discord.com/oauth2/authorize"
             f"?client_id={CLIENT_ID}"
-            f"&redirect_uri=https%3A%2F%2Fdistrito305auth.discloud.app%2Fcallback"
             f"&response_type=code"
+            f"&redirect_uri=https%3A%2F%2Fdistrito305-auth-web.onrender.com%2Fcallback"
             f"&scope=identify%20guilds.join"
         )
         self.add_item(discord.ui.Button(
@@ -261,25 +322,12 @@ async def panel_verificacion(interaction: discord.Interaction, canal: discord.Te
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("🏓 ¡Pong! El bot responde correctamente.")
 
-@bot.tree.command(name="entrada", description="Marcar inicio de turno")
-async def entrada(interaction: discord.Interaction):
-    await interaction.response.defer()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO fichajes (user_id, entrada, salida) VALUES (?, ?, ?)", (str(interaction.user.id), now, None))
-    conn.commit()
-    await interaction.followup.send(f"🟢 Turno iniciado a las **{now}**")
-
-@bot.tree.command(name="salida", description="Marcar fin de turno")
-async def salida(interaction: discord.Interaction):
-    await interaction.response.defer()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE fichajes SET salida=? WHERE user_id=? AND salida IS NULL", (now, str(interaction.user.id)))
-    conn.commit()
-    await interaction.followup.send(f"🔴 Turno finalizado a las **{now}**")
-
+# ==========================================
+# Inicialización
+# ==========================================
 if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    bot.run("MTU0ODUzNTg4OTEwMDAxMzYwOA.GDgLYG.-HLJ_xU4wD4GkcbtYofX-fJyYWihZCoNszAes8")
+    bot.run(BOT_TOKEN)
