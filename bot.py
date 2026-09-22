@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import threading
-import aiohttp
+import requests
 from flask import Flask, request
 import discord
 from discord.ext import commands, tasks
@@ -35,7 +35,7 @@ CFX_CODE = "5oozbea"
 FIVEM_IP = "34.128.4.46"
 BANNER_URL = "https://cdn.discordapp.com/attachments/1542762298995773512/1544973576405520484/C4EF066D-E2D3-413B-8FEF-E42CABAE9E4A.png"
 
-# Header global para evitar el Error 1015 / Rate Limit de Cloudflare
+# User-Agent personalizado obligatorio para evitar bloqueos por Cloudflare/Discord
 CUSTOM_USER_AGENT = "DistritoBOTAuth/2.0 (https://distrito305-auth-web.onrender.com)"
 
 # ==========================================
@@ -66,114 +66,102 @@ def callback():
         return "<h3>Error: No se recibió código de autorización.</h3>", 400
 
     if not CLIENT_SECRET or not BOT_TOKEN:
-        return "<h3>Error: Faltan las variables CLIENT_SECRET o BOT_TOKEN en el entorno de Render.</h3>", 500
+        return "<h3>Error: Faltan las variables CLIENT_SECRET o BOT_TOKEN en Render.</h3>", 500
 
-    # Peticiones asíncronas para evitar bloqueos por peticiones síncronas masivas
-    async def process_oauth():
-        async with aiohttp.ClientSession() as session:
-            # A) Intercambiar code por Access Token
-            payload = {
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": REDIRECT_URI
-            }
-            headers_oauth = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": CUSTOM_USER_AGENT
-            }
+    try:
+        # A) Intercambiar el código por el Access Token
+        payload = {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI
+        }
+        headers_oauth = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": CUSTOM_USER_AGENT
+        }
 
-            async with session.post("https://discord.com/api/v10/oauth2/token", data=payload, headers=headers_oauth) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return False, f"Error al intercambiar token ({resp.status}): {text}"
-                token_data = await resp.json()
+        token_res = requests.post("https://discord.com/api/v10/oauth2/token", data=payload, headers=headers_oauth)
+        if token_res.status_code != 200:
+            return f"<h3>Error al obtener token de Discord ({token_res.status_code}):</h3><pre>{token_res.text}</pre>", 400
 
-            access_token = token_data.get("access_token")
+        token_data = token_res.json()
+        access_token = token_data.get("access_token")
 
-            # B) Obtener datos del usuario (@me)
-            user_headers = {
-                "Authorization": f"Bearer {access_token}",
-                "User-Agent": CUSTOM_USER_AGENT
-            }
-            async with session.get("https://discord.com/api/v10/users/@me", headers=user_headers) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return False, f"Error al obtener datos de usuario ({resp.status}): {text}"
-                user_info = await resp.json()
+        # B) Obtener la información del usuario (@me)
+        user_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": CUSTOM_USER_AGENT
+        }
+        user_res = requests.get("https://discord.com/api/v10/users/@me", headers=user_headers)
+        if user_res.status_code != 200:
+            return f"<h3>Error al obtener datos del usuario ({user_res.status_code}):</h3><pre>{user_res.text}</pre>", 400
 
-            user_id = user_info.get("id")
-            username = user_info.get("username")
+        user_info = user_res.json()
+        user_id = user_info.get("id")
+        username = user_info.get("username")
 
-            # C) Añadir al servidor y otorgar rol de verificado
-            bot_headers = {
-                "Authorization": f"Bot {BOT_TOKEN}",
-                "Content-Type": "application/json",
-                "User-Agent": CUSTOM_USER_AGENT
-            }
+        # C) Forzar unión al servidor y otorgar el rol de verificado
+        bot_headers = {
+            "Authorization": f"Bot {BOT_TOKEN}",
+            "Content-Type": "application/json",
+            "User-Agent": CUSTOM_USER_AGENT
+        }
 
-            await session.put(
-                f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}",
-                json={"access_token": access_token},
-                headers=bot_headers
-            )
+        requests.put(
+            f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}",
+            json={"access_token": access_token},
+            headers=bot_headers
+        )
 
-            await session.put(
-                f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{ROL_VERIFICADO_ID}",
-                headers=bot_headers
-            )
+        requests.put(
+            f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{ROL_VERIFICADO_ID}",
+            headers=bot_headers
+        )
 
-            # D) Geolocalización y Logs
-            ip_cliente = request.headers.get('X-Forwarded-For', request.remote_addr)
-            if ip_cliente:
-                ip_cliente = ip_cliente.split(',')[0].strip()
+        # D) Logs e IP
+        ip_cliente = request.headers.get('X-Forwarded-For', request.remote_addr)
+        if ip_cliente:
+            ip_cliente = ip_cliente.split(',')[0].strip()
 
-            pais, ciudad = "Desconocido", "Desconocida"
-            try:
-                async with session.get(f"http://ip-api.com/json/{ip_cliente}", timeout=3) as geo_resp:
-                    if geo_resp.status == 200:
-                        geo_res = await geo_resp.json()
-                        pais = geo_res.get("country", "Desconocido")
-                        ciudad = geo_res.get("city", "Desconocida")
-            except Exception:
-                pass
+        pais, ciudad = "Desconocido", "Desconocida"
+        try:
+            geo_res = requests.get(f"http://ip-api.com/json/{ip_cliente}", timeout=3).json()
+            pais = geo_res.get("country", "Desconocido")
+            ciudad = geo_res.get("city", "Desconocida")
+        except Exception:
+            pass
 
-            embed_payload = {
-                "embeds": [{
-                    "title": "🟢 Nueva Verificación Registrada",
-                    "color": 3066993,
-                    "fields": [
-                        {"name": "Usuario", "value": f"<@{user_id}> (`{username}`)", "inline": True},
-                        {"name": "IP Registrada", "value": f"`{ip_cliente}`", "inline": True},
-                        {"name": "Ubicación", "value": f"{ciudad}, {pais}", "inline": True}
-                    ]
-                }]
-            }
+        embed_payload = {
+            "embeds": [{
+                "title": "🟢 Nueva Verificación Registrada (OAuth2)",
+                "color": 3066993,
+                "fields": [
+                    {"name": "Usuario", "value": f"<@{user_id}> (`{username}`)", "inline": True},
+                    {"name": "IP Registrada", "value": f"`{ip_cliente}`", "inline": True},
+                    {"name": "Ubicación", "value": f"{ciudad}, {pais}", "inline": True}
+                ]
+            }]
+        }
 
-            await session.post(
-                f"https://discord.com/api/v10/channels/{CANAL_LOGS_ID}/messages",
-                json=embed_payload,
-                headers=bot_headers
-            )
+        requests.post(
+            f"https://discord.com/api/v10/channels/{CANAL_LOGS_ID}/messages",
+            json=embed_payload,
+            headers=bot_headers
+        )
 
-            return True, "OK"
+        return "<h1 style='color:green; font-family:sans-serif; text-align:center; margin-top:50px;'>¡Verificación completada con éxito! Ya puedes volver a Discord.</h1>", 200
 
-    # Ejecutar corrutina en el bucle asíncrono
-    future = asyncio.run_coroutine_threadsafe(process_oauth(), bot.loop)
-    success, error_msg = future.result(timeout=15)
-
-    if not success:
-        return f"<h3>Error durante la verificación:</h3><pre>{error_msg}</pre>", 400
-
-    return "<h1 style='color:green; font-family:sans-serif; text-align:center; margin-top:50px;'>¡Verificación completada con éxito! Ya puedes volver a Discord.</h1>", 200
+    except Exception as e:
+        return f"<h3>Error interno en la autenticación:</h3><pre>{str(e)}</pre>", 500
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================
-# 5. Eventos y Tareas de Discord Bot
+# 5. Eventos y Tareas del Bot
 # ==========================================
 @bot.event
 async def on_ready():
@@ -182,7 +170,7 @@ async def on_ready():
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
-        print(f"⚡ ¡Éxito! Se sincronizaron {len(synced)} comandos de barra (Slash Commands).")
+        print(f"⚡ ¡Éxito! Se sincronizaron {len(synced)} comandos de barra.")
     except Exception as e:
         print(f"❌ Error al sincronizar comandos: {e}")
 
@@ -207,6 +195,7 @@ async def actualizar_estado_fivem():
         f"https://frontend.cfx-services.net/api/servers/single/{CFX_CODE}"
     ]
 
+    import aiohttp
     async with aiohttp.ClientSession(headers=headers) as session:
         for url in urls:
             try:
